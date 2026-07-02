@@ -1,0 +1,293 @@
+"""
+Agent G (시뮬레이션 에이전트) - 5단계: Monte Carlo 샘플링
+
+4단계(model.py)가 예측한 분포(mu, sigma)를 기반으로
+1000개의 미래 가격 경로를 생성하고, 낙관/중립/비관 시나리오로 분류한다.
+
+What-if가 있는 경우(3단계에서 매크로 변수가 분류된 경우):
+  - 충격 전 분포 + 충격 후 분포 두 세트를 각각 샘플링해서 비교 결과를 만든다.
+"""
+
+import logging
+from typing import Optional
+
+import numpy as np
+
+logger = logging.getLogger(__name__)
+
+N_PATHS = 1000  # Monte Carlo 경로 수
+HORIZON = 30    # 예측 기간 (일)
+
+# 시나리오 분류 기준 (상위/하위 몇 % 기준으로 낙관/비관 구분)
+OPTIMISTIC_PERCENTILE = 90  # 상위 10%
+PESSIMISTIC_PERCENTILE = 10  # 하위 10%
+
+
+def sample_paths(
+    mu: float,
+    sigma: float,
+    current_price: float,
+    horizon: int = HORIZON,
+    n_paths: int = N_PATHS,
+    seed: Optional[int] = None,
+) -> np.ndarray:
+    """
+    LSTM이 예측한 (mu, sigma)로 horizon일간의 가격 경로를 n_paths개 생성.
+
+    Returns:
+        np.ndarray, shape (n_paths, horizon+1)
+        각 행이 하나의 가격 경로. 첫 번째 열은 current_price (시작점).
+    """
+    rng = np.random.default_rng(seed)
+
+    # 일별 로그수익률: 누적 수익률(mu)을 horizon으로 나눠서 일별 기대값 추정
+    daily_mu = mu / horizon
+    daily_sigma = sigma / np.sqrt(horizon)
+
+    # (n_paths, horizon) 형태로 일별 로그수익률 샘플링
+    daily_log_returns = rng.normal(
+        loc=daily_mu,
+        scale=daily_sigma,
+        size=(n_paths, horizon),
+    )
+
+    # 누적 로그수익률 → 가격 경로
+    cumulative = np.cumsum(daily_log_returns, axis=1)
+    price_paths = current_price * np.exp(
+        np.concatenate([np.zeros((n_paths, 1)), cumulative], axis=1)
+    )
+
+    return price_paths
+
+
+def summarize_paths(
+    price_paths: np.ndarray,
+    current_price: float,
+) -> dict:
+    """
+    1000개 가격 경로를 요약 통계로 변환.
+
+    Returns:
+        {
+            "expected_return_pct": float,   # 평균 수익률 (%)
+            "upside_probability": float,    # 상승 확률 (0~1)
+            "volatility": float,            # 표준편차 (수익률 기준)
+            "scenarios": {
+                "optimistic": {...},        # 상위 25% 경로 평균
+                "neutral": {...},           # 중간 50% 경로 평균
+                "pessimistic": {...},       # 하위 25% 경로 평균
+            },
+            "percentile_paths": {          # 프론트 차트용 대표 경로
+                "p10": [...],
+                "p50": [...],
+                "p90": [...],
+            }
+        }
+    """
+    final_prices = price_paths[:, -1]
+    final_returns = (final_prices - current_price) / current_price
+
+    # 기본 통계
+    expected_return_pct = float(np.mean(final_returns) * 100)
+    upside_probability = float(np.mean(final_returns > 0))
+    volatility = float(np.std(final_returns))
+
+    # 시나리오 분류 (수익률 기준 퍼센타일로 구분)
+    opt_mask = final_returns >= np.percentile(final_returns, OPTIMISTIC_PERCENTILE)
+    pes_mask = final_returns <= np.percentile(final_returns, PESSIMISTIC_PERCENTILE)
+    neu_mask = ~opt_mask & ~pes_mask
+
+    def scenario_summary(mask: np.ndarray) -> dict:
+        paths = price_paths[mask]
+        returns = final_returns[mask]
+        return {
+            "expected_return_pct": float(np.mean(returns) * 100),
+            "avg_final_price": float(np.mean(paths[:, -1])),
+            "path_count": int(mask.sum()),
+        }
+
+    # 프론트 차트용 대표 경로 (10/50/90 퍼센타일)
+    p10_idx = np.argsort(final_returns)[int(N_PATHS * 0.10)]
+    p50_idx = np.argsort(final_returns)[int(N_PATHS * 0.50)]
+    p90_idx = np.argsort(final_returns)[int(N_PATHS * 0.90)]
+
+    return {
+        "expected_return_pct": expected_return_pct,
+        "upside_probability": upside_probability,
+        "volatility": volatility,
+        "scenarios": {
+            "optimistic": scenario_summary(opt_mask),
+            "neutral": scenario_summary(neu_mask),
+            "pessimistic": scenario_summary(pes_mask),
+        },
+        "percentile_paths": {
+            "p10": price_paths[p10_idx].tolist(),
+            "p50": price_paths[p50_idx].tolist(),
+            "p90": price_paths[p90_idx].tolist(),
+        },
+    }
+
+
+def run_monte_carlo(
+    base_prediction: dict,
+    current_price: float,
+    shock_predictions: Optional[list] = None,
+    horizon: int = HORIZON,
+    n_paths: int = N_PATHS,
+) -> dict:
+    """
+    Monte Carlo 시뮬레이션 메인 함수.
+
+    Args:
+        base_prediction: {"mu": float, "sigma": float}  ← 4단계 predict_distribution() 결과
+        current_price: 현재 종가
+        shock_predictions: [
+            {
+                "variable": "BASE_RATE_KR",
+                "direction": "up",
+                "prediction": {"mu": float, "sigma": float}
+            },
+            ...
+        ]  ← What-if 예측 결과들 (없으면 None)
+        horizon: 예측 기간 (일)
+        n_paths: Monte Carlo 경로 수
+
+    Returns:
+        {
+            "base": { summarize_paths 결과 },
+            "what_if": [   ← shock_predictions가 있을 때만
+                {
+                    "variable": "BASE_RATE_KR",
+                    "direction": "up",
+                    "result": { summarize_paths 결과 },
+                    "impact_pct": float,  # 충격 후 기대수익률 - 충격 전 기대수익률
+                },
+                ...
+            ]
+        }
+    """
+    # 일반 예측 경로 생성
+    base_paths = sample_paths(
+        mu=base_prediction["mu"],
+        sigma=base_prediction["sigma"],
+        current_price=current_price,
+        horizon=horizon,
+        n_paths=n_paths,
+        seed=42,
+    )
+    base_summary = summarize_paths(base_paths, current_price)
+
+    result = {"base": base_summary, "what_if": []}
+
+    # What-if 경로 생성 (리스크 요인이 분류된 경우에만)
+    if shock_predictions:
+        for shock in shock_predictions:
+            shock_paths = sample_paths(
+                mu=shock["prediction"]["mu"],
+                sigma=shock["prediction"]["sigma"],
+                current_price=current_price,
+                horizon=horizon,
+                n_paths=n_paths,
+                seed=42,  # 동일 seed로 비교 일관성 확보
+            )
+            shock_summary = summarize_paths(shock_paths, current_price)
+            impact = (
+                shock_summary["expected_return_pct"]
+                - base_summary["expected_return_pct"]
+            )
+
+            result["what_if"].append({
+                "variable": shock["variable"],
+                "direction": shock["direction"],
+                "result": shock_summary,
+                "impact_pct": round(impact, 2),
+            })
+
+            logger.info(
+                "What-if [%s %s]: 기대수익률 변화 %+.2f%%",
+                shock["variable"], shock["direction"], impact,
+            )
+
+    return result
+
+
+if __name__ == "__main__":
+    import argparse
+    import json
+
+    from simulation_agent.data_collector import collect_simulation_inputs, DEFAULT_B_DB_PATH
+    from simulation_agent.preprocessor import build_feature_table
+    from simulation_agent.model import get_or_train_model, predict_distribution, apply_shock
+    from simulation_agent.risk_classifier import classify_risk_factors
+
+    parser = argparse.ArgumentParser(description="Agent G Monte Carlo 테스트")
+    parser.add_argument("--ticker", default="005930")
+    parser.add_argument("--user-id", default="u1")
+    parser.add_argument("--db-path", default=DEFAULT_B_DB_PATH)
+    parser.add_argument("--sequence-length", type=int, default=60)
+    parser.add_argument("--horizon", type=int, default=30)
+    parser.add_argument("--epochs", type=int, default=50)
+    args = parser.parse_args()
+
+    logging.basicConfig(level=logging.INFO)
+
+    # 1단계: 데이터 수집
+    raw = collect_simulation_inputs(
+        ticker=args.ticker, user_id=args.user_id, db_path=args.db_path
+    )
+
+    # 2단계: 전처리
+    table = build_feature_table(raw["price_data"], raw["macro_data"])
+    current_price = float(raw["price_data"]["latest"]["current_price"])
+
+    # 3단계: 리스크 분류 (테스트용 더미 아젠다)
+    macro_agenda = {
+        "bull_summary": "환율 상승이 수출에 긍정적",
+        "bull_arguments": "원달러 환율 상승으로 수출 채산성 개선",
+        "bear_summary": "금리 인상 우려",
+        "bear_arguments": "기준금리 추가 인상 시 투자심리 위축 우려",
+    }
+    risk_factors = classify_risk_factors(macro_agenda=macro_agenda)
+    logger.info("분류된 리스크 요인: %s", risk_factors)
+
+    # 4단계: LSTM 예측
+    model = get_or_train_model(
+        ticker=args.ticker,
+        feature_table=table,
+        sequence_length=args.sequence_length,
+        horizon=args.horizon,
+        epochs=args.epochs,
+        force_retrain=True,
+    )
+    base_pred = predict_distribution(model, table, sequence_length=args.sequence_length)
+    logger.info("일반 예측: %s", base_pred)
+
+    # What-if 예측 (리스크 요인 있을 때만)
+    shock_preds = []
+    for rf in risk_factors:
+        shocked_table = apply_shock(table, rf["variable"], rf["direction"])
+        shock_pred = predict_distribution(model, shocked_table, args.sequence_length)
+        shock_preds.append({
+            "variable": rf["variable"],
+            "direction": rf["direction"],
+            "prediction": shock_pred,
+        })
+
+    # 5단계: Monte Carlo
+    mc_result = run_monte_carlo(
+        base_prediction=base_pred,
+        current_price=current_price,
+        shock_predictions=shock_preds if shock_preds else None,
+        horizon=args.horizon,
+        n_paths=N_PATHS,
+    )
+
+    # percentile_paths는 길어서 제외하고 출력
+    output = {
+        "base": {k: v for k, v in mc_result["base"].items() if k != "percentile_paths"},
+        "what_if": [
+            {k: v for k, v in w.items() if k != "result" or True}
+            for w in mc_result["what_if"]
+        ],
+    }
+    print(json.dumps(output, ensure_ascii=False, indent=2))
