@@ -1,13 +1,14 @@
 ## 1. 담당 범위
 
+```
 Simulation Agent 파이프라인
-├── 1단계: 데이터 수집       (data_collector.py)    — 주가/매크로 수집
-├── 2단계: 전처리            (preprocessor.py)     — 로그수익률 계산, LSTM 텐서 구성
-├── 3단계: 리스크 분류       (risk_classifier.py)   — LLM으로 매크로 리스크 요인 분류
-├── 4단계: LSTM 예측         (model.py)            — 수익률 분포(mu, sigma) 예측 + What-if
-├── 5단계: Monte Carlo       (monte_carlo.py)     — 1,000개 가격 경로 시뮬레이션
-├── 6단계: 결과 패키징       (result_packager.py)   — 리스크 프로필 기반 해석 문구 생성
-└── 7단계: 프론트 전송       (service.py)           — 최종 결과 전송
+1단계: 데이터 수집    (data_collector.py)   - Data Agent DB에서 주가/매크로 수집
+2단계: 전처리         (preprocessor.py)     - 로그수익률 계산, LSTM 텐서 구성
+3단계: 리스크 분류    (risk_classifier.py)  - LLM으로 매크로 리스크 요인 분류
+4단계: LSTM 예측      (model.py)            - 수익률 분포(mu, sigma) 예측 + What-if
+5단계: Monte Carlo    (monte_carlo.py)      - 1,000개 가격 경로 시뮬레이션
+6단계: 결과 패키징    (result_packager.py)  - 리스크 프로필 기반 해석 문구 생성
+7단계: 프론트 전송    (service.py)          - 최종 결과 전송
 ```
 
 ---
@@ -17,7 +18,7 @@ Simulation Agent 파이프라인
 - **LLM**: Upstage `solar-pro` (리스크 요인 분류)
 - **모델**: PyTorch LSTM (수익률 분포 학습)
 - **시뮬레이션**: Monte Carlo (1,000-path, 30일)
-- **DB**: SQLite `reports.db` (주가/매크로 데이터)
+- **DB**: Data Agent의 SQLite `reports.db` (주가/매크로 데이터)
 
 ---
 
@@ -39,18 +40,17 @@ Simulation Agent 파이프라인
 
 ```
 financial_research_simulation_agent/
-├── requirements.txt
-├── .env.example
-│
-└── simulation_agent/
-    ├── service.py              # 진입점: run_simulation()
-    ├── data_collector.py       # DB에서 데이터 수집
-    ├── preprocessor.py         # 피처 테이블 생성 (로그수익률, 변동성 등)
-    ├── risk_classifier.py      # LLM 기반 매크로 리스크 요인 분류
-    ├── model.py                # LSTM 학습/예측/캐싱, apply_shock()
-    ├── monte_carlo.py          # Monte Carlo 경로 생성 및 시나리오 요약
-    ├── result_packager.py      # 결과 패키징 및 해석 문구 생성
-    └── _external_deps.py       # sys.path 연결
+  requirements.txt
+  .env.example
+  simulation_agent/
+    service.py              # 진입점: run_simulation()
+    data_collector.py       # Data_Agent DB에서 데이터 수집
+    preprocessor.py         # 피처 테이블 생성 (로그수익률, 변동성 등)
+    risk_classifier.py      # LLM 기반 매크로 리스크 요인 분류
+    model.py                # LSTM 학습/예측/캐싱, apply_shock()
+    monte_carlo.py          # Monte Carlo 경로 생성 및 시나리오 요약
+    result_packager.py      # 결과 패키징 및 해석 문구 생성
+    _external_deps.py       # sys.path 연결
 ```
 
 ---
@@ -74,16 +74,16 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
-`.env` 파일 생성:
+`.env` 파일 생성 (루트 폴더에):
 
 ```
-# Data_Agent_Repo 경로
+# Data Agent 리포 경로
 DATA_AGENT_REPO_PATH=../financial_research_data_agent
 
-# DB 경로
+# Data Agent DB 경로
 B_DB_PATH=../financial-research-agent/db/reports.db
 
-# Upstage API 키
+# Upstage API 키 (리스크 분류 LLM)
 UPSTAGE_API_KEY=your_upstage_key
 ```
 
@@ -118,9 +118,9 @@ python -m simulation_agent.result_packager --ticker 005930
 
 ---
 
-## 8. Debate_Agent 연동 방법
+## 8. Debate Agent 연동 방법
 
-Debate_Agent는 아래 함수를 호출하면 됩니다.
+Debate Agent는 아래 함수를 호출하면 됩니다.
 
 ```python
 from simulation_agent.service import run_simulation
